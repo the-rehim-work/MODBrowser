@@ -7,7 +7,7 @@ import sys
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
-
+from browser.web.adblock import is_local_host
 try:
   from qtwebview2 import QtWebView2Widget
 
@@ -92,8 +92,91 @@ class WebView2BrowserView(QWidget):
       core = self._widget._webview.CoreWebView2
       core.DocumentTitleChanged += self._on_document_title_changed
       core.NavigationCompleted += self._on_navigation_completed
+      core.NewWindowRequested += self._on_new_window_requested
+      core.NavigationStarting += self._on_navigation_starting
+      self._install_resource_blocker(core)
     except Exception:
       pass
+
+  def _on_navigation_starting(self, _sender, args):
+    if not self._browser_window.settings.https_only:
+      return
+    try:
+      uri = args.Uri
+    except Exception:
+      return
+    q = QUrl(uri)
+    if q.scheme() != "http" or not q.host() or is_local_host(q.host()):
+      return
+    secure = QUrl(q)
+    secure.setScheme("https")
+    try:
+      args.Cancel = True
+    except Exception:
+      return
+    QTimer.singleShot(0, lambda u=secure.toString(): self._widget.load_url(u))
+
+  def _install_resource_blocker(self, core):
+    try:
+      from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
+      core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All)
+    except Exception:
+      try:
+        core.AddWebResourceRequestedFilter("*", 0)
+      except Exception:
+        return
+    try:
+      core.WebResourceRequested += self._on_web_resource_requested
+    except Exception:
+      pass
+
+  def _on_web_resource_requested(self, _sender, args):
+    blocker = getattr(self._browser_window, "_content_blocker", None)
+    if blocker is None or not blocker.is_enabled():
+      return
+    try:
+      url = args.Request.Uri
+      ctx = self._resource_context_name(args.ResourceContext)
+    except Exception:
+      return
+    if not blocker.should_block(url, self._current_url.toString(), ctx):
+      return
+    try:
+      env = self._widget._webview.CoreWebView2.Environment
+      args.Response = env.CreateWebResourceResponse(None, 403, "Blocked", "")
+    except Exception:
+      pass
+
+  def _resource_context_name(self, ctx):
+    name = str(ctx).rsplit(".", 1)[-1]
+    return {
+      "Document": "document",
+      "Stylesheet": "stylesheet",
+      "Image": "image",
+      "Media": "media",
+      "Font": "font",
+      "Script": "script",
+      "XmlHttpRequest": "xmlhttprequest",
+      "Fetch": "xmlhttprequest",
+      "WebSocket": "websocket",
+      "Ping": "ping",
+    }.get(name, "other")
+
+  def open_dev_tools(self):
+    if not self._widget.is_ready:
+      return
+    try:
+      self._widget._webview.CoreWebView2.OpenDevToolsWindow()
+    except Exception:
+      pass
+
+  def _on_new_window_requested(self, _sender, args):
+    try:
+      uri = args.Uri
+      args.Handled = True
+    except Exception:
+      return
+    QTimer.singleShot(0, lambda: self._browser_window.open_url_in_new_tab(uri))
 
   def _on_document_title_changed(self, _sender, _args):
     QTimer.singleShot(0, self._emit_document_title)
@@ -212,6 +295,14 @@ class WebView2BrowserView(QWidget):
       return
     self._widget._webview.CoreWebView2.Stop()
     self._loading = False
+
+  def open_dev_tools(self):
+    if not self._widget.is_ready:
+      return
+    try:
+      self._widget._webview.CoreWebView2.OpenDevToolsWindow()
+    except Exception:
+      pass
 
   def history(self):
     return self

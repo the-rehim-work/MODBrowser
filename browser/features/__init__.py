@@ -1,5 +1,6 @@
 from browser.features.downloads import DownloadManager, DownloadPanel, DownloadsPage, handle_download
 from browser.features.history import HistoryPage
+from browser.features.bookmarks import BookmarksBar, BookmarksPage
 
 __all__ = [
   "DownloadManager",
@@ -7,4 +8,6 @@ __all__ = [
   "DownloadsPage",
   "HistoryPage",
   "handle_download",
+  "BookmarksBar",
+  "BookmarksPage",
 ]

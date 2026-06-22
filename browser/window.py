@@ -35,12 +35,13 @@ from browser.ui.find_bar import FindBar
 from browser.ui.icons import back_icon, close_icon, forward_icon, plus_icon, reload_icon, stop_icon
 from browser.ui.styles import DARK_STYLE
 from browser.ui.toast import Toast
+from browser.web import page, tab
 from browser.web.google_auth import apply_firefox_identity, is_google_auth_url
 from browser.web.engine import preferred_engine
 from browser.web.media import check_h264_support
 from browser.web.profile import apply_browser_identity, create_incognito_profile
 from browser.web.tab import BrowserTab, tab_display_title
-
+from browser.session.bundle import build_session, read_session, write_session
 
 class AddressBar(QLineEdit):
   def __init__(self, parent=None):
@@ -304,6 +305,12 @@ class BrowserWindow(QMainWindow):
 
     self._app_menu.addSeparator()
 
+    export_session_action = self._app_menu.addAction("Sessiyanı ixrac et")
+    export_session_action.triggered.connect(self.export_session)
+
+    import_session_action = self._app_menu.addAction("Sessiyanı idxal et")
+    import_session_action.triggered.connect(self.import_session)
+
     history_action = self._app_menu.addAction("Tarixçə")
     history_action.setShortcut(QKeySequence("Ctrl+H"))
     history_action.triggered.connect(self.open_history_page)
@@ -469,6 +476,59 @@ class BrowserWindow(QMainWindow):
     for tab in self._tabs:
       if isinstance(tab, BookmarksPage):
         tab.refresh()
+
+  def _open_tabs_snapshot(self):
+    snapshot = []
+    for tab in self._tabs:
+      if not isinstance(tab, BrowserTab):
+        continue
+      url = tab.current_url().toString()
+      if not url or url == "about:blank":
+        continue
+      snapshot.append((url, tab.view.title()))
+    return snapshot
+
+  def export_session(self):
+    tabs = self._open_tabs_snapshot()
+    if not tabs:
+      self._toast.show_message("İxrac üçün açıq tab yoxdur")
+      return
+    answer = QMessageBox.question(
+      self,
+      "Sessiya ixracı",
+      "Əlfəcinləri də daxil edək?",
+      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    bookmarks = self._bookmarks.items() if answer == QMessageBox.StandardButton.Yes else None
+    path, _ = QFileDialog.getSaveFileName(
+      self, "Sessiyanı ixrac et", "session.json", "JSON (*.json)"
+    )
+    if not path:
+      return
+    try:
+      write_session(build_session(tabs, self._session.history(), bookmarks), path)
+      self._toast.show_message(f"{len(tabs)} tab ixrac edildi")
+    except OSError:
+      self._toast.show_message("İxrac alınmadı")
+
+  def import_session(self):
+    path, _ = QFileDialog.getOpenFileName(
+      self, "Sessiyanı idxal et", "", "JSON (*.json)"
+    )
+    if not path:
+      return
+    try:
+      tabs, bookmarks = read_session(path)
+    except (OSError, ValueError):
+      self._toast.show_message("Fayl oxunmadı")
+      return
+    if bookmarks:
+      self._bookmarks.import_items(bookmarks)
+      self.refresh_bookmarks_bar()
+      self.refresh_bookmark_star()
+    for url, _title in tabs:
+      self.add_tab(url)
+    self._toast.show_message(f"{len(tabs)} tab bərpa edildi")
 
   def reset_idle_timer(self):
     if self.settings.idle_minutes <= 0:
@@ -678,7 +738,7 @@ class BrowserWindow(QMainWindow):
     else:
       tab.view.setHtml(BLANK_PAGE, QUrl("about:blank"))
       self.address_bar.clear()
-      self.address_bar.select_all_and_focus()
+      QTimer.singleShot(80, self.address_bar.select_all_and_focus)
     return tab
 
   def reset_tab(self, tab: BrowserTab):
@@ -774,6 +834,7 @@ class BrowserWindow(QMainWindow):
 
     self.address_bar.setPlaceholderText("URL daxil edin və ya axtarın...")
     self.btn_reload.setEnabled(True)
+    self.set_page_input_blocked(False)
     url = page.current_url().toString()
     if url and url not in ("", "about:blank"):
       self.address_bar.setText(url)
@@ -886,7 +947,11 @@ class BrowserWindow(QMainWindow):
     tab = self.current_tab()
     if tab is None:
       return
-    page = tab.view.page()
+    view = tab.view
+    if hasattr(view, "open_dev_tools"):
+      view.open_dev_tools()
+      return
+    page = view.page()
     if not hasattr(page, "setDevToolsPage"):
       self._toast.show_message("DevTools yalnız WebEngine rejimində mövcuddur")
       return
@@ -950,19 +1015,15 @@ class BrowserWindow(QMainWindow):
     if index >= 0 and not icon.isNull():
       self.tab_bar.setTabIcon(index, icon)
 
-  def update_address_bar(self, url: QUrl):
-    tab = self.current_tab()
-    if not tab or self.sender() != tab.view:
+  def update_address_bar(self, tab, url: QUrl):
+    if tab is not self.current_tab():
       return
-    if (
-      self.address_bar.hasFocus()
-      or QApplication.focusWidget() is self.address_bar
-    ):
+    if self.address_bar.hasFocus() or QApplication.focusWidget() is self.address_bar:
       return
     url_str = url.toString()
     if url_str and url_str != "about:blank":
       self.address_bar.setText(url_str)
-    elif tab is self.current_tab():
+    else:
       self.address_bar.clear()
     self.refresh_bookmark_star()
 

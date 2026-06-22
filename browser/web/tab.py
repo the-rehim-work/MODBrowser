@@ -119,7 +119,7 @@ class BrowserTab(QWidget):
 
   def _on_url_changed(self, url: QUrl):
     self._browser_window.update_google_auth_state(self, url)
-    self.window().update_address_bar(url)
+    self._browser_window.update_address_bar(self, url)
     display = tab_display_title(self.view.title(), url)
     self.window().update_tab_title(self, display)
 

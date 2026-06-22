@@ -29,27 +29,10 @@ class BookmarkStore:
     self._items: list[Bookmark] = []
 
   def load(self) -> None:
-    path = bookmarks_path()
-    if not path.is_file():
-      return
-    try:
-      raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-      return
-    self._items = [
-      Bookmark(url=row.get("url", ""), title=row.get("title", ""))
-      for row in raw
-      if row.get("url")
-    ]
+    return
 
   def save(self) -> None:
-    data = [{"url": b.url, "title": b.title} for b in self._items]
-    try:
-      bookmarks_path().write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-      )
-    except OSError:
-      pass
+    return
 
   def items(self) -> list[Bookmark]:
     return list(self._items)

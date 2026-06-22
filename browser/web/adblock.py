@@ -248,6 +248,24 @@ class ContentBlocker(QWebEngineUrlRequestInterceptor):
   def reset_count(self):
     self._blocked_count = 0
 
+  def should_block(self, request_url, first_party_url, request_type):
+    if not self._enabled or request_type == "document":
+      return False
+    if self._engine.is_blocked(request_url, first_party_url or request_url, request_type):
+      self._blocked_count += 1
+      return True
+    return False
+
+  def https_target(self, scheme, host, url_str):
+    if (
+      self._settings.https_only
+      and scheme == "http"
+      and host
+      and not is_local_host(host)
+    ):
+      return "https://" + url_str[7:]
+    return None
+
   def interceptRequest(self, info):
     url = info.requestUrl()
 
@@ -256,25 +274,11 @@ class ContentBlocker(QWebEngineUrlRequestInterceptor):
 
     request_type = self._resource_map.get(info.resourceType(), "other")
 
-    if (
-      self._settings.https_only
-      and url.scheme() == "http"
-      and url.host()
-      and not is_local_host(url.host())
-      and request_type in ("document", "subdocument")
-    ):
-      secure = QUrl(url)
-      secure.setScheme("https")
-      info.redirect(secure)
-      return
+    if request_type in ("document", "subdocument"):
+      target = self.https_target(url.scheme(), url.host(), url.toString())
+      if target is not None:
+        info.redirect(QUrl(target))
+        return
 
-    if not self._enabled or request_type == "document":
-      return
-
-    if self._engine.is_blocked(
-      url.toString(),
-      info.firstPartyUrl().toString(),
-      request_type,
-    ):
+    if self.should_block(url.toString(), info.firstPartyUrl().toString(), request_type):
       info.block(True)
-      self._blocked_count += 1
