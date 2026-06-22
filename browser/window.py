@@ -6,6 +6,7 @@ from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl, QSize
 from PyQt6.QtGui import QAction, QIcon, QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
   QApplication,
+  QFileDialog,
   QHBoxLayout,
   QLineEdit,
   QMainWindow,
@@ -21,11 +22,15 @@ from PyQt6.QtWidgets import (
 
 from browser.cleanup import cleanup_pycache
 from browser.constants import BLANK_PAGE, HOME_URL, NEW_TAB_TITLE
+from browser.features.bookmarks import BookmarksBar, BookmarksPage
+from browser.features.bookmark_io import export_html, parse_html
 from browser.features.downloads import DownloadManager, DownloadPanel, DownloadsPage, handle_download
 from browser.features.history import HistoryPage
+from browser.session.persistence import BookmarkStore
 from browser.session.settings import BrowserSettings
 from browser.session.store import SessionStore
 from browser.ui.dialogs import SHORTCUTS_HTML, SettingsDialog, apply_proxy
+from browser.ui.devtools import DevToolsDock
 from browser.ui.find_bar import FindBar
 from browser.ui.icons import back_icon, close_icon, forward_icon, plus_icon, reload_icon, stop_icon
 from browser.ui.styles import DARK_STYLE
@@ -97,11 +102,14 @@ class BrowserWindow(QMainWindow):
     super().__init__()
     self.settings = BrowserSettings()
     self._session = SessionStore()
-    self._profile = create_incognito_profile(self.settings, self)
+    self._bookmarks = BookmarkStore()
+    self._bookmarks.load()
+    self._profile, self._content_blocker = create_incognito_profile(self.settings, self)
     self._profile.downloadRequested.connect(self._handle_download)
     self._download_manager = DownloadManager(self)
     self._download_manager.record_updated.connect(self._on_download_updated)
     self._tabs: list = []
+    self._devtools = None
     self._google_auth_tabs = 0
     self._using_firefox_identity = False
     self._identity_sync_timer = QTimer(self)
@@ -119,6 +127,9 @@ class BrowserWindow(QMainWindow):
     self._build_ui()
     self._build_app_menu()
     self._build_shortcuts()
+    self._shield_timer = QTimer(self)
+    self._shield_timer.timeout.connect(self._update_shield)
+    self._shield_timer.start(1000)
     QApplication.instance().installEventFilter(self)
     self.reset_idle_timer()
     apply_proxy(self.settings)
@@ -132,7 +143,7 @@ class BrowserWindow(QMainWindow):
     if check_h264_support(page):
       return
     self._toast.show_message(
-      "H.264 video dəstəklənmir. YouTube canlı yayımlar və rezka.ag işləməyə bilər. "
+      "H.264 video dəstəklənmir. YouTube canlı yayımlar və bəzi saytlar işləməyə bilər. "
       "Windows-da WebView2 runtime quraşdırın.",
       12000,
     )
@@ -154,6 +165,29 @@ class BrowserWindow(QMainWindow):
     self.btn_forward = self._make_nav_btn(forward_icon(14), "İrəli (Alt+Sağ)", self._go_forward)
     self.btn_reload = self._make_nav_btn(reload_icon(14), "Yenilə (Ctrl+R)", self._toggle_reload_stop)
 
+    self.address_bar = AddressBar()
+    self.address_bar.setObjectName("addressBar")
+    self.address_bar.setPlaceholderText("URL daxil edin və ya axtarın...")
+    self.address_bar.returnPressed.connect(self._navigate_from_bar)
+
+    self.star_btn = QPushButton("☆")
+    self.star_btn.setObjectName("starBtn")
+    self.star_btn.setToolTip("Əlfəcinə əlavə et (Ctrl+D)")
+    self.star_btn.setFixedSize(32, 32)
+    self.star_btn.setFlat(True)
+    self.star_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    self.star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.star_btn.clicked.connect(self._toggle_bookmark)
+
+    self.shield_btn = QPushButton("🛡 0")
+    self.shield_btn.setObjectName("shieldBtn")
+    self.shield_btn.setToolTip("Reklam bloku")
+    self.shield_btn.setFixedHeight(32)
+    self.shield_btn.setFlat(True)
+    self.shield_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    self.shield_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.shield_btn.clicked.connect(self._toggle_adblock)
+
     self.menu_btn = QPushButton("⋮")
     self.menu_btn.setObjectName("menuBtn")
     self.menu_btn.setToolTip("Menyu")
@@ -165,15 +199,12 @@ class BrowserWindow(QMainWindow):
     self.menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
     self.menu_btn.clicked.connect(self._show_app_menu)
 
-    self.address_bar = AddressBar()
-    self.address_bar.setObjectName("addressBar")
-    self.address_bar.setPlaceholderText("URL daxil edin və ya axtarın...")
-    self.address_bar.returnPressed.connect(self._navigate_from_bar)
-
     tb.addWidget(self.btn_back)
     tb.addWidget(self.btn_forward)
     tb.addWidget(self.btn_reload)
     tb.addWidget(self.address_bar, stretch=1)
+    tb.addWidget(self.star_btn)
+    tb.addWidget(self.shield_btn)
     tb.addWidget(self.menu_btn)
 
     self.find_bar = FindBar(self)
@@ -216,7 +247,11 @@ class BrowserWindow(QMainWindow):
     self.download_panel = DownloadPanel(self._download_manager)
     self._toast = Toast(central)
 
+    self.bookmarks_bar = BookmarksBar(self._bookmarks, self)
+    self.bookmarks_bar.hide()
+
     root.addWidget(toolbar)
+    root.addWidget(self.bookmarks_bar)
     root.addWidget(self.find_bar)
     root.addWidget(tab_row)
     root.addWidget(self.stack, stretch=1)
@@ -253,6 +288,20 @@ class BrowserWindow(QMainWindow):
     restore_tab.setShortcut(QKeySequence("Ctrl+Shift+T"))
     restore_tab.triggered.connect(self.restore_closed_tab)
 
+    bookmarks_action = self._app_menu.addAction("Əlfəcinlər")
+    bookmarks_action.setShortcut(QKeySequence("Ctrl+B"))
+    bookmarks_action.triggered.connect(self.open_bookmarks_page)
+
+    bookmarks_bar_action = self._app_menu.addAction("Əlfəcin paneli")
+    bookmarks_bar_action.setShortcut(QKeySequence("Ctrl+Shift+B"))
+    bookmarks_bar_action.triggered.connect(self._toggle_bookmarks_bar)
+
+    export_bm = self._app_menu.addAction("Əlfəcinləri ixrac et")
+    export_bm.triggered.connect(self.export_bookmarks)
+
+    import_bm = self._app_menu.addAction("Əlfəcinləri idxal et")
+    import_bm.triggered.connect(self.import_bookmarks)
+
     self._app_menu.addSeparator()
 
     history_action = self._app_menu.addAction("Tarixçə")
@@ -281,8 +330,8 @@ class BrowserWindow(QMainWindow):
     quit_action.triggered.connect(self.close)
 
     for action in (
-      new_tab, close_tab, restore_tab, history_action,
-      downloads_action, quit_action,
+      new_tab, close_tab, restore_tab, bookmarks_action, bookmarks_bar_action,
+      history_action, downloads_action, quit_action,
     ):
       self.addAction(action)
 
@@ -293,6 +342,17 @@ class BrowserWindow(QMainWindow):
       ("Ctrl+Tab", self._next_tab),
       ("Ctrl+Shift+Tab", self._prev_tab),
       ("Ctrl+R", self._reload),
+      ("F5", self._reload),
+      ("Ctrl+F5", self._hard_reload),
+      ("Ctrl+Shift+R", self._hard_reload),
+      ("Shift+F5", self._hard_reload),
+      ("F6", self._cycle_focus),
+      ("Escape", self._on_escape),
+      ("Alt+Home", self._go_home),
+      ("Ctrl+P", self._print_page),
+      ("F12", self._toggle_devtools),
+      ("Ctrl+Shift+I", self._toggle_devtools),
+      ("Ctrl+Shift+J", self._toggle_devtools),
       ("F11", self.toggle_fullscreen),
       ("Ctrl++", self._zoom_in),
       ("Ctrl+=", self._zoom_in),
@@ -300,12 +360,115 @@ class BrowserWindow(QMainWindow):
       ("Ctrl+0", self._zoom_reset),
       ("Alt+Left", self._go_back),
       ("Alt+Right", self._go_forward),
+      ("Ctrl+D", self._toggle_bookmark),
     ]
     for seq, handler in shortcuts:
       action = QAction(self)
       action.setShortcut(QKeySequence(seq))
       action.triggered.connect(handler)
       self.addAction(action)
+
+    for i in range(1, 9):
+      action = QAction(self)
+      action.setShortcut(QKeySequence(f"Ctrl+{i}"))
+      action.triggered.connect(lambda _checked=False, idx=i - 1: self._jump_to_tab(idx))
+      self.addAction(action)
+    last_action = QAction(self)
+    last_action.setShortcut(QKeySequence("Ctrl+9"))
+    last_action.triggered.connect(self._last_tab)
+    self.addAction(last_action)
+
+  def _update_shield(self):
+    blocker = self._content_blocker
+    if blocker.is_enabled():
+      self.shield_btn.setText(f"🛡 {blocker.blocked_count}")
+      self.shield_btn.setToolTip(f"Reklam bloku aktiv · {blocker.blocked_count} bloklandı")
+    else:
+      self.shield_btn.setText("🛡 off")
+      self.shield_btn.setToolTip("Reklam bloku söndürülüb")
+
+  def _toggle_adblock(self):
+    blocker = self._content_blocker
+    blocker.set_enabled(not blocker.is_enabled())
+    self.settings.adblock_enabled = blocker.is_enabled()
+    state = "aktiv edildi" if blocker.is_enabled() else "söndürüldü"
+    self._toast.show_message(f"Reklam bloku {state}")
+    self._update_shield()
+
+  def open_bookmarks_page(self):
+    def create():
+      page = BookmarksPage(self._bookmarks, self)
+      self._add_special_tab(page, "Əlfəcinlər")
+    self._open_special_page(BookmarksPage, "Əlfəcinlər", create)
+
+  def _toggle_bookmark(self):
+    tab = self.current_tab()
+    if not tab:
+      return
+    url = tab.current_url().toString()
+    if not url or url in ("", "about:blank"):
+      return
+    if self._bookmarks.contains(url):
+      self._bookmarks.remove(url)
+      self._toast.show_message("Əlfəcin silindi")
+    else:
+      self._bookmarks.add(url, tab.view.title())
+      self._toast.show_message("Əlfəcinə əlavə edildi")
+    self.refresh_bookmark_star()
+    self.refresh_bookmarks_bar()
+
+  def refresh_bookmark_star(self):
+    tab = self.current_tab()
+    marked = bool(tab and self._bookmarks.contains(tab.current_url().toString()))
+    self.star_btn.setText("★" if marked else "☆")
+
+  def refresh_bookmarks_bar(self):
+    if getattr(self, "bookmarks_bar", None) is not None:
+      self.bookmarks_bar.refresh()
+
+  def _toggle_bookmarks_bar(self):
+    if self.bookmarks_bar.isVisible():
+      self.bookmarks_bar.hide()
+    else:
+      self.bookmarks_bar.refresh()
+      self.bookmarks_bar.show()
+
+  def export_bookmarks(self):
+    items = self._bookmarks.items()
+    if not items:
+      self._toast.show_message("İxrac üçün əlfəcin yoxdur")
+      return
+    path, _ = QFileDialog.getSaveFileName(
+      self, "Əlfəcinləri ixrac et", "bookmarks.html", "HTML (*.html)"
+    )
+    if not path:
+      return
+    try:
+      export_html(items, path)
+      self._toast.show_message(f"{len(items)} əlfəcin ixrac edildi")
+    except OSError:
+      self._toast.show_message("İxrac alınmadı")
+
+  def import_bookmarks(self):
+    path, _ = QFileDialog.getOpenFileName(
+      self, "Əlfəcinləri idxal et", "", "HTML (*.html *.htm)"
+    )
+    if not path:
+      return
+    try:
+      pairs = parse_html(path)
+    except OSError:
+      self._toast.show_message("Fayl oxunmadı")
+      return
+    added = self._bookmarks.import_items(pairs)
+    self._toast.show_message(
+      f"{added} əlfəcin idxal edildi" if added else "Yeni əlfəcin tapılmadı"
+    )
+    self.refresh_bookmark_star()
+    self.refresh_bookmarks_bar()
+    for tab in self._tabs:
+      if isinstance(tab, BookmarksPage):
+        tab.refresh()
 
   def reset_idle_timer(self):
     if self.settings.idle_minutes <= 0:
@@ -362,6 +525,8 @@ class BrowserWindow(QMainWindow):
       self.open_history_page()
     elif isinstance(widget, DownloadsPage):
       self.open_downloads_page()
+    elif isinstance(widget, BookmarksPage):
+      self.open_bookmarks_page()
 
   def close_all_tabs(self):
     while self.tab_bar.count() > 0:
@@ -394,7 +559,7 @@ class BrowserWindow(QMainWindow):
     self.update_tab_title(tab, tab_display_title(entry.title, QUrl(entry.url)))
 
   def _show_settings(self):
-    dialog = SettingsDialog(self.settings, self._profile, self)
+    dialog = SettingsDialog(self.settings, self._profile, self._content_blocker, self)
     if dialog.exec():
       self.reset_idle_timer()
       self._toast.show_message("Parametrlər yeniləndi")
@@ -513,6 +678,7 @@ class BrowserWindow(QMainWindow):
     else:
       tab.view.setHtml(BLANK_PAGE, QUrl("about:blank"))
       self.address_bar.clear()
+      self.address_bar.select_all_and_focus()
     return tab
 
   def reset_tab(self, tab: BrowserTab):
@@ -596,11 +762,13 @@ class BrowserWindow(QMainWindow):
       placeholder = {
         DownloadsPage: "Yükləmələr",
         HistoryPage: "Tarixçə",
+        BookmarksPage: "Əlfəcinlər",
       }.get(type(page), "")
       self.address_bar.setPlaceholderText(placeholder)
       self.btn_back.setEnabled(False)
       self.btn_forward.setEnabled(False)
       self.btn_reload.setEnabled(False)
+      self.star_btn.setText("☆")
       self.find_bar.hide_bar()
       return
 
@@ -612,6 +780,9 @@ class BrowserWindow(QMainWindow):
     else:
       self.address_bar.clear()
     self._update_nav_buttons()
+    self.refresh_bookmark_star()
+    if self._devtools is not None and self._devtools.isVisible():
+      self._devtools.inspect(page.view.page())
 
   def set_page_input_blocked(self, blocked: bool):
     tab = self.current_tab()
@@ -660,6 +831,74 @@ class BrowserWindow(QMainWindow):
       tab.stop()
     else:
       tab.reload()
+
+  def _hard_reload(self):
+    tab = self.current_tab()
+    if tab:
+      tab.reload_bypass_cache()
+
+  def _cycle_focus(self):
+    if self.address_bar.hasFocus():
+      tab = self.current_tab()
+      if tab:
+        tab.view.setFocus()
+    else:
+      self.address_bar.select_all_and_focus()
+
+  def _on_escape(self):
+    if self.find_bar.isVisible():
+      self.find_bar.hide_bar()
+      return
+    tab = self.current_tab()
+    if tab and tab.is_loading():
+      tab.stop()
+
+  def _go_home(self):
+    tab = self.current_tab()
+    if tab:
+      tab.navigate(HOME_URL)
+    else:
+      self.add_tab(HOME_URL)
+
+  def _print_page(self):
+    tab = self.current_tab()
+    if not tab:
+      return
+    page = tab.view.page()
+    if not hasattr(page, "printToPdf"):
+      self._toast.show_message("Çap yalnız WebEngine rejimində mövcuddur")
+      return
+    path, _ = QFileDialog.getSaveFileName(self, "PDF kimi saxla", "səhifə.pdf", "PDF (*.pdf)")
+    if not path:
+      return
+    page.printToPdf(path)
+    self._toast.show_message("PDF yadda saxlanıldı")
+
+  def _jump_to_tab(self, index: int):
+    if 0 <= index < self.tab_bar.count():
+      self.tab_bar.setCurrentIndex(index)
+
+  def _last_tab(self):
+    if self.tab_bar.count() > 0:
+      self.tab_bar.setCurrentIndex(self.tab_bar.count() - 1)
+
+  def _toggle_devtools(self):
+    tab = self.current_tab()
+    if tab is None:
+      return
+    page = tab.view.page()
+    if not hasattr(page, "setDevToolsPage"):
+      self._toast.show_message("DevTools yalnız WebEngine rejimində mövcuddur")
+      return
+    if self._devtools is None:
+      self._devtools = DevToolsDock(self)
+      self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._devtools)
+    if self._devtools.isVisible():
+      self._devtools.detach()
+      self._devtools.hide()
+    else:
+      self._devtools.inspect(page)
+      self._devtools.show()
 
   def _zoom_in(self):
     tab = self.current_tab()
@@ -725,12 +964,14 @@ class BrowserWindow(QMainWindow):
       self.address_bar.setText(url_str)
     elif tab is self.current_tab():
       self.address_bar.clear()
+    self.refresh_bookmark_star()
 
   def update_load_progress(self, _progress: int):
     self._update_nav_buttons()
 
   def on_load_finished(self, _ok: bool):
     self._update_nav_buttons()
+    self.refresh_bookmark_star()
 
   def _handle_download(self, download):
     handle_download(self, download, self._download_manager)
@@ -757,6 +998,7 @@ def main():
   )
   app = QApplication(sys.argv)
   app.setApplicationName("MOD Browser")
+  app.setOrganizationName("MOD")
   app.aboutToQuit.connect(cleanup_pycache)
   app.setStyle("Fusion")
   app.setStyleSheet(DARK_STYLE)

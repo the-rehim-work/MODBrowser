@@ -1,18 +1,58 @@
 """Browser tab with embedded web view."""
 
+import ipaddress
+
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
 from browser.constants import NEW_TAB_TITLE
+from browser.web.adblock import is_local_host
 from browser.web.engine import create_browser_view, preferred_engine
 from browser.web.page import BrowserPage
 
+_DIRECT_SCHEMES = (
+  "http://",
+  "https://",
+  "file://",
+  "about:",
+  "data:",
+  "view-source:",
+  "blob:",
+  "chrome://",
+)
+
 
 def _looks_like_raw_url(text: str) -> bool:
-  lowered = text.lower()
-  return lowered.startswith(("http://", "https://", "data:", "about:", "file:", "blob:"))
+  return text.lower().startswith(_DIRECT_SCHEMES)
+
+
+def _is_ip(text: str) -> bool:
+  try:
+    ipaddress.ip_address(text.strip("[]"))
+    return True
+  except ValueError:
+    return False
+
+
+def _looks_like_host(text: str) -> bool:
+  if " " in text:
+    return False
+  head = text.split("/", 1)[0].split("?", 1)[0]
+  if not head:
+    return False
+  host = head
+  if head.count(":") == 1:
+    maybe_host, maybe_port = head.rsplit(":", 1)
+    if maybe_port.isdigit() and maybe_host:
+      return True
+    host = head
+  if host == "localhost":
+    return True
+  if _is_ip(host):
+    return True
+  return "." in host and not host.startswith(".") and not host.endswith(".")
 
 
 def tab_display_title(title: str = "", url: QUrl | None = None) -> str:
@@ -100,14 +140,23 @@ class BrowserTab(QWidget):
     text = url.strip()
     if not text:
       return ""
-    if not text.startswith(("http://", "https://", "file://")):
-      if "." in text and " " not in text:
-        text = "https://" + text
-      else:
-        text = "https://www.google.com/search?q=" + text.replace(" ", "+")
-    elif text.startswith("http://") and self._browser_window.settings.https_only:
-      text = "https://" + text[7:]
-    return text
+
+    if _looks_like_raw_url(text):
+      if (
+        text.lower().startswith("http://")
+        and self._browser_window.settings.https_only
+        and not is_local_host(QUrl(text).host())
+      ):
+        return "https://" + text[7:]
+      return text
+
+    if _looks_like_host(text):
+      head = text.split("/", 1)[0]
+      prefix = "http://" if is_local_host(head) else "https://"
+      return prefix + text
+
+    query = bytes(QUrl.toPercentEncoding(text)).decode("ascii")
+    return "https://www.google.com/search?q=" + query
 
   def navigate(self, url: str):
     text = self._normalize_url(url)
@@ -124,6 +173,13 @@ class BrowserTab(QWidget):
 
   def reload(self):
     self.view.reload()
+
+  def reload_bypass_cache(self):
+    page = self.view.page()
+    if hasattr(page, "triggerAction") and hasattr(page, "WebAction"):
+      page.triggerAction(page.WebAction.ReloadAndBypassCache)
+    else:
+      self.view.reload()
 
   def stop(self):
     self.view.stop()

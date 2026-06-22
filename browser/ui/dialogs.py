@@ -1,6 +1,5 @@
 """Settings and proxy dialogs."""
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtNetwork import QNetworkProxy
 from PyQt6.QtWidgets import (
   QCheckBox,
@@ -13,7 +12,6 @@ from PyQt6.QtWidgets import (
   QLineEdit,
   QSpinBox,
   QVBoxLayout,
-  QWidget,
 )
 
 from browser.session.settings import BrowserSettings, USER_AGENT_PRESETS
@@ -35,17 +33,24 @@ def apply_proxy(settings: BrowserSettings):
 
 
 class SettingsDialog(QDialog):
-  def __init__(self, settings: BrowserSettings, profile, parent=None):
+  def __init__(self, settings: BrowserSettings, profile, blocker, parent=None):
     super().__init__(parent)
     self._settings = settings
     self._profile = profile
+    self._blocker = blocker
     self.setWindowTitle("Parametrlər")
     self.setMinimumWidth(420)
 
     layout = QVBoxLayout(self)
 
-    self.https_cb = QCheckBox("HTTPS yalnız rejimi")
+    self.https_cb = QCheckBox("HTTPS yalnız rejimi (daxili şəbəkə istisna)")
     self.https_cb.setChecked(settings.https_only)
+
+    self.adblock_cb = QCheckBox("Reklam və izləyiciləri blokla")
+    self.adblock_cb.setChecked(settings.adblock_enabled)
+
+    self.block_count_label = QLabel(f"Bu sessiyada bloklandı: {blocker.blocked_count}")
+    self.block_count_label.setObjectName("blockCountLabel")
 
     idle_row = QHBoxLayout()
     idle_row.addWidget(QLabel("Hərəkətsizlikdən sonra bağla (dəq.):"))
@@ -85,6 +90,8 @@ class SettingsDialog(QDialog):
     form.addRow("Proxy port:", self.proxy_port)
 
     layout.addWidget(self.https_cb)
+    layout.addWidget(self.adblock_cb)
+    layout.addWidget(self.block_count_label)
     layout.addLayout(idle_row)
     layout.addWidget(QLabel("User-Agent:"))
     layout.addWidget(self.ua_combo)
@@ -100,6 +107,8 @@ class SettingsDialog(QDialog):
 
   def _save(self):
     self._settings.https_only = self.https_cb.isChecked()
+    self._settings.adblock_enabled = self.adblock_cb.isChecked()
+    self._blocker.set_enabled(self._settings.adblock_enabled)
     self._settings.idle_minutes = self.idle_spin.value()
     self._settings.user_agent_key = self.ua_combo.currentData()
     self._settings.proxy_enabled = self.proxy_cb.isChecked()
@@ -121,12 +130,18 @@ SHORTCUTS_HTML = """
 <tr><td><b>Ctrl+T</b></td><td>Yeni tab</td></tr>
 <tr><td><b>Ctrl+W</b></td><td>Tabı bağla</td></tr>
 <tr><td><b>Ctrl+Shift+T</b></td><td>Son tabı bərpa et</td></tr>
-<tr><td><b>Ctrl+L</b></td><td>Ünvan sətri</td></tr>
-<tr><td><b>Ctrl+F</b></td><td>Səhifədə axtar</td></tr>
-<tr><td><b>Ctrl+H</b></td><td>Tarixçə</td></tr>
-<tr><td><b>Ctrl+J</b></td><td>Yükləmələr</td></tr>
-<tr><td><b>Ctrl+R</b></td><td>Yenilə</td></tr>
+<tr><td><b>Ctrl+1…8 / Ctrl+9</b></td><td>Taba keç / son tab</td></tr>
 <tr><td><b>Ctrl+Tab</b></td><td>Növbəti tab</td></tr>
+<tr><td><b>Ctrl+L / F6</b></td><td>Ünvan sətri / fokus dəyiş</td></tr>
+<tr><td><b>Ctrl+F</b></td><td>Səhifədə axtar</td></tr>
+<tr><td><b>Esc</b></td><td>Dayandır / axtarışı bağla</td></tr>
+<tr><td><b>Ctrl+B / Ctrl+D</b></td><td>Əlfəcinlər / əlavə et</td></tr>
+<tr><td><b>Ctrl+H / Ctrl+J</b></td><td>Tarixçə / Yükləmələr</td></tr>
+<tr><td><b>F5 / Ctrl+R</b></td><td>Yenilə</td></tr>
+<tr><td><b>Ctrl+F5 / Ctrl+Shift+R</b></td><td>Keşsiz yenilə</td></tr>
+<tr><td><b>F12 / Ctrl+Shift+I</b></td><td>DevTools</td></tr>
+<tr><td><b>Ctrl+P</b></td><td>PDF kimi çap</td></tr>
+<tr><td><b>Alt+Home</b></td><td>Ana səhifə</td></tr>
 <tr><td><b>Ctrl++ / Ctrl+-</b></td><td>Zoom</td></tr>
 <tr><td><b>Ctrl+0</b></td><td>Zoom sıfırla</td></tr>
 <tr><td><b>F11</b></td><td>Tam ekran</td></tr>

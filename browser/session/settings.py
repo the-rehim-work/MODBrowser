@@ -41,6 +41,7 @@ class BrowserSettings:
   https_only: bool = True
   idle_minutes: int = 30
   user_agent_key: str = "desktop"
+  adblock_enabled: bool = True
   proxy_enabled: bool = False
   proxy_type: str = "http"
   proxy_host: str = ""

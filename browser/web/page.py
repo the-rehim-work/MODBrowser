@@ -7,6 +7,7 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QMenu
 
 from browser.ui.icons import back_icon, forward_icon, reload_icon
+from browser.web.adblock import is_local_host
 
 _LINK_OPEN_LABELS = (
   "open link in new tab",
@@ -106,18 +107,18 @@ class BrowserView(QWebEngineView):
 
     if has_link:
       url = link_url.toString()
-      open_new = QAction("Yeni tabda aç", menu)
-      open_new.triggered.connect(
+      open_tab = QAction("Yeni tabda aç", menu)
+      open_tab.triggered.connect(
         lambda _checked=False, link=url: self._browser_window.open_url_in_new_tab(
           link, background=True
         )
       )
       first = _first_content_action(menu)
       if first is not None:
-        menu.insertAction(first, open_new)
+        menu.insertAction(first, open_tab)
         menu.insertSeparator(first)
       else:
-        menu.addAction(open_new)
+        menu.addAction(open_tab)
         menu.addSeparator()
 
     self._add_nav_actions(menu, _first_content_action(menu))
@@ -155,6 +156,7 @@ class BrowserPage(QWebEnginePage):
       and self._browser_window.settings.https_only
       and url.scheme() == "http"
       and url.host()
+      and not is_local_host(url.host())
     ):
       secure = QUrl(url)
       secure.setScheme("https")
@@ -163,13 +165,12 @@ class BrowserPage(QWebEnginePage):
     return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
   def createWindow(self, wtype):
-    current_index = self._browser_window.tab_bar.currentIndex()
-    tab = self._browser_window.add_tab()
-    if (
-      wtype == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
-      and current_index >= 0
-    ):
-      self._browser_window.tab_bar.setCurrentIndex(current_index)
+    bw = self._browser_window
+    background = wtype == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
+    current_index = bw.tab_bar.currentIndex()
+    tab = bw.add_tab()
+    if background and current_index >= 0:
+      bw.tab_bar.setCurrentIndex(current_index)
     return tab.view.page()
 
   def _on_window_close_requested(self):

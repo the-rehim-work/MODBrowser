@@ -1,9 +1,16 @@
 """Incognito WebEngine profile — no persistent storage or logs."""
 
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings, qWebEngineChromiumVersion
+import json
+
+from PyQt6.QtWebEngineCore import (
+  QWebEngineProfile,
+  QWebEngineScript,
+  QWebEngineSettings,
+  qWebEngineChromiumVersion,
+)
 
 from browser.session.settings import BrowserSettings
-from browser.web.google_auth import GoogleAuthInterceptor, apply_firefox_identity
+from browser.web.adblock import ContentBlocker, GENERIC_COSMETIC_CSS
 from browser.web.media import configure_media_settings
 
 
@@ -31,6 +38,22 @@ def apply_browser_identity(profile: QWebEngineProfile, settings: BrowserSettings
   configure_client_hints(profile)
 
 
+def _inject_cosmetic(profile: QWebEngineProfile):
+  css = json.dumps(GENERIC_COSMETIC_CSS)
+  source = (
+    "(function(){var c=" + css + ";"
+    "var s=document.createElement('style');s.textContent=c;"
+    "(document.head||document.documentElement).appendChild(s);})();"
+  )
+  script = QWebEngineScript()
+  script.setName("contentBlockerCosmetic")
+  script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+  script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+  script.setRunsOnSubFrames(True)
+  script.setSourceCode(source)
+  profile.scripts().insert(script)
+
+
 def create_incognito_profile(settings: BrowserSettings, parent=None):
   profile = QWebEngineProfile(parent)
 
@@ -42,7 +65,9 @@ def create_incognito_profile(settings: BrowserSettings, parent=None):
   profile.setPersistentPermissionsPolicy(
     QWebEngineProfile.PersistentPermissionsPolicy.StoreInMemory
   )
-  profile.setUrlRequestInterceptor(GoogleAuthInterceptor())
+
+  blocker = ContentBlocker(settings, profile)
+  profile.setUrlRequestInterceptor(blocker)
   apply_browser_identity(profile, settings)
 
   web_settings = profile.settings()
@@ -63,4 +88,7 @@ def create_incognito_profile(settings: BrowserSettings, parent=None):
   web_settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, False)
   configure_media_settings(web_settings)
 
-  return profile
+  if settings.adblock_enabled:
+    _inject_cosmetic(profile)
+
+  return profile, blocker

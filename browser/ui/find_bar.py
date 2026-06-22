@@ -1,7 +1,5 @@
 """In-page find bar (Ctrl+F)."""
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
 
@@ -47,9 +45,6 @@ class FindBar(QWidget):
 
     self.input.textChanged.connect(self._find_next)
     self.hide()
-
-    esc = QShortcut(QKeySequence("Esc"), self)
-    esc.activated.connect(self.hide_bar)
 
   def show_bar(self):
     self.show()
