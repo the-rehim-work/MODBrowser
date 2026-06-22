@@ -1,0 +1,268 @@
+"""Windows WebView2 wrapper with a QWebEngineView-like API."""
+
+from __future__ import annotations
+
+import sys
+
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QVBoxLayout, QWidget
+
+try:
+  from qtwebview2 import QtWebView2Widget
+
+  WEBVIEW2_AVAILABLE = True
+except ImportError:
+  WEBVIEW2_AVAILABLE = False
+  QtWebView2Widget = None
+
+
+class WebView2PageStub:
+  def __init__(self, view: "WebView2BrowserView"):
+    self._view = view
+
+  def isLoading(self) -> bool:
+    return self._view._loading
+
+  def findText(self, text: str, _flags=0, callback=None):
+    if not text:
+      self._view._widget.evaluate_js(
+        "window.getSelection().removeAllRanges();",
+        lambda _r: callback(0) if callback else None,
+      )
+      return
+    script = (
+      f"window.find({text!r}, false, false, true); "
+      "window.getSelection().toString().length > 0"
+    )
+    self._view._widget.evaluate_js(
+      script,
+      lambda r: callback(1 if isinstance(r, dict) and r.get("success") and r.get("result") else 0)
+      if callback
+      else None,
+    )
+
+
+class WebView2BrowserView(QWidget):
+  titleChanged = pyqtSignal(str)
+  urlChanged = pyqtSignal(QUrl)
+  loadProgress = pyqtSignal(int)
+  loadFinished = pyqtSignal(bool)
+  iconChanged = pyqtSignal(QIcon)
+
+  def __init__(self, browser_window, parent=None):
+    super().__init__(parent)
+    self._browser_window = browser_window
+    self._loading = False
+    self._zoom = 1.0
+    self._current_url = QUrl()
+    self._page = WebView2PageStub(self)
+    self._input_blocked = False
+
+    layout = QVBoxLayout(self)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    self._widget = QtWebView2Widget(
+      parent=self,
+      context_menus=True,
+      handle_new_window=True,
+      lazyload=False,
+      fullscreen_support=True,
+    )
+    layout.addWidget(self._widget)
+    self._widget.bridge.domContentLoaded.connect(self._on_dom_loaded)
+    self._widget.bridge.initialization_done.connect(self._on_initialized)
+
+  def page(self):
+    return self._page
+
+  def _on_initialized(self, success: bool, _error: str):
+    if not success:
+      self.loadFinished.emit(False)
+      return
+    if self._input_blocked:
+      self.set_input_blocked(True)
+    self._hook_webview_events()
+
+  def _hook_webview_events(self):
+    if not self._widget.is_ready:
+      return
+    try:
+      core = self._widget._webview.CoreWebView2
+      core.DocumentTitleChanged += self._on_document_title_changed
+      core.NavigationCompleted += self._on_navigation_completed
+    except Exception:
+      pass
+
+  def _on_document_title_changed(self, _sender, _args):
+    QTimer.singleShot(0, self._emit_document_title)
+
+  def _on_navigation_completed(self, _sender, _args):
+    QTimer.singleShot(0, self._emit_document_title)
+    QTimer.singleShot(0, self._refresh_metadata)
+
+  def _emit_document_title(self):
+    title = self.title().strip()
+    if title:
+      self.titleChanged.emit(title)
+
+  def _on_dom_loaded(self):
+    self._loading = False
+    self.loadProgress.emit(100)
+    self.loadFinished.emit(True)
+    self._refresh_metadata()
+
+  def _refresh_metadata(self):
+    self._widget.evaluate_js(
+      "({ title: document.title, href: location.href })",
+      self._metadata_callback,
+    )
+
+  def _metadata_callback(self, result: dict):
+    if not isinstance(result, dict) or not result.get("success"):
+      return
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+      return
+    title = payload.get("title") or ""
+    href = payload.get("href") or ""
+    if title:
+      self.titleChanged.emit(title)
+    elif href:
+      url = QUrl(href)
+      if url.isValid() and url.host():
+        self.titleChanged.emit(url.host().removeprefix("www."))
+    if href:
+      url = QUrl(href)
+      if url.isValid():
+        self._current_url = url
+        self.urlChanged.emit(url)
+
+  def setHtml(self, html: str, base_url: QUrl | None = None):
+    self._loading = True
+    self.loadProgress.emit(10)
+    base = (
+      base_url.toString()
+      if isinstance(base_url, QUrl) and base_url.isValid()
+      else "about:blank"
+    )
+    self._current_url = QUrl(base)
+    self._widget.load_html(html, base)
+    self.urlChanged.emit(self._current_url)
+
+  def setUrl(self, url: QUrl):
+    text = url.toString()
+    self._loading = True
+    self.loadProgress.emit(10)
+    if not text or text == "about:blank":
+      self._widget.load_html("<html><body></body></html>")
+      self._current_url = QUrl("about:blank")
+      self._loading = False
+      self.urlChanged.emit(self._current_url)
+      self.loadFinished.emit(True)
+      return
+    self._current_url = url
+    self.urlChanged.emit(url)
+    self._widget.load_url(text)
+
+  def url(self) -> QUrl:
+    if self._widget.is_ready:
+      try:
+        uri = self._widget._webview.CoreWebView2.Source
+        if uri is not None:
+          return QUrl(uri.ToString())
+      except Exception:
+        pass
+    return self._current_url
+
+  def title(self) -> str:
+    if self._widget.is_ready:
+      try:
+        return self._widget._webview.CoreWebView2.DocumentTitle or ""
+      except Exception:
+        pass
+    return ""
+
+  def back(self):
+    if not self._widget.is_ready:
+      return
+    core = self._widget._webview.CoreWebView2
+    if core.CanGoBack:
+      self._loading = True
+      self.loadProgress.emit(10)
+      core.GoBack()
+
+  def forward(self):
+    if not self._widget.is_ready:
+      return
+    core = self._widget._webview.CoreWebView2
+    if core.CanGoForward:
+      self._loading = True
+      self.loadProgress.emit(10)
+      core.GoForward()
+
+  def reload(self):
+    self._loading = True
+    self.loadProgress.emit(10)
+    self._widget.reload()
+
+  def stop(self):
+    if not self._widget.is_ready:
+      return
+    self._widget._webview.CoreWebView2.Stop()
+    self._loading = False
+
+  def history(self):
+    return self
+
+  def canGoBack(self) -> bool:
+    if not self._widget.is_ready:
+      return False
+    return bool(self._widget._webview.CoreWebView2.CanGoBack)
+
+  def canGoForward(self) -> bool:
+    if not self._widget.is_ready:
+      return False
+    return bool(self._widget._webview.CoreWebView2.CanGoForward)
+
+  def setZoomFactor(self, factor: float):
+    self._zoom = factor
+    if not self._widget.is_ready:
+      return
+    try:
+      self._widget._webview.ZoomFactor = float(factor)
+    except Exception:
+      pass
+
+  def zoomFactor(self) -> float:
+    if self._widget.is_ready:
+      try:
+        return float(self._widget._webview.ZoomFactor)
+      except Exception:
+        pass
+    return self._zoom
+
+  def set_input_blocked(self, blocked: bool):
+    self._input_blocked = blocked
+    container = getattr(self._widget, "_container", None)
+    if container is not None:
+      container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, blocked)
+    if not self._widget.is_ready:
+      return
+    webview = getattr(self._widget, "_webview", None)
+    if webview is None or webview.IsDisposed:
+      return
+    if sys.platform != "win32":
+      return
+    try:
+      import ctypes
+      ctypes.windll.user32.EnableWindow(webview.Handle.ToInt32(), not blocked)
+    except Exception:
+      pass
+
+  def createStandardContextMenu(self):
+    return None
+
+  def lastContextMenuRequest(self):
+    return None
