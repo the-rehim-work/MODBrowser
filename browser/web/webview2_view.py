@@ -1,5 +1,6 @@
 """Windows WebView2 wrapper with a QWebEngineView-like API."""
 
+
 from __future__ import annotations
 
 import sys
@@ -94,6 +95,7 @@ class WebView2BrowserView(QWidget):
       core.NavigationCompleted += self._on_navigation_completed
       core.NewWindowRequested += self._on_new_window_requested
       core.NavigationStarting += self._on_navigation_starting
+      core.SourceChanged += self._on_source_changed
       self._install_resource_blocker(core)
     except Exception:
       pass
@@ -184,6 +186,38 @@ class WebView2BrowserView(QWidget):
   def _on_navigation_completed(self, _sender, _args):
     QTimer.singleShot(0, self._emit_document_title)
     QTimer.singleShot(0, self._refresh_metadata)
+
+  def _on_source_changed(self, _sender, _args):
+    QTimer.singleShot(0, self._emit_source)
+
+  def _emit_source(self):
+    if not self._widget.is_ready:
+      return
+    try:
+      source = self._widget._webview.CoreWebView2.Source
+    except Exception:
+      return
+    if not source:
+      return
+    url = QUrl(source)
+    if url.isValid():
+      self._current_url = url
+      self.urlChanged.emit(url)
+
+  def focus_page(self):
+    self.setFocus()
+    if not self._widget.is_ready:
+      return
+    webview = getattr(self._widget, "_webview", None)
+    if webview is None or getattr(webview, "IsDisposed", False):
+      return
+    if sys.platform != "win32":
+      return
+    try:
+      import ctypes
+      ctypes.windll.user32.SetFocus(webview.Handle.ToInt32())
+    except Exception:
+      pass
 
   def _emit_document_title(self):
     title = self.title().strip()

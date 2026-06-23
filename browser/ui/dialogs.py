@@ -1,5 +1,6 @@
 """Settings and proxy dialogs."""
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtNetwork import QNetworkProxy
 from PyQt6.QtWidgets import (
   QCheckBox,
@@ -12,6 +13,9 @@ from PyQt6.QtWidgets import (
   QLineEdit,
   QSpinBox,
   QVBoxLayout,
+  QGridLayout,
+  QScrollArea,
+  QWidget,
 )
 
 from browser.session.settings import BrowserSettings, USER_AGENT_PRESETS
@@ -123,29 +127,74 @@ class SettingsDialog(QDialog):
     apply_proxy(self._settings)
     self.accept()
 
+SHORTCUTS = [
+  ("Ctrl+T", "Yeni tab"),
+  ("Ctrl+W", "Tabı bağla"),
+  ("Ctrl+Shift+T", "Son tabı bərpa et"),
+  ("Ctrl+1…8 / Ctrl+9", "Taba keç / son tab"),
+  ("Ctrl+Tab", "Növbəti tab"),
+  ("Ctrl+L / F6", "Ünvan sətri / fokus dəyiş"),
+  ("Ctrl+F", "Səhifədə axtar"),
+  ("Esc", "Dayandır / axtarışı bağla"),
+  ("Ctrl+B / Ctrl+D", "Əlfəcinlər / əlfəcinə əlavə et"),
+  ("Ctrl+H / Ctrl+J", "Tarixçə / Yükləmələr"),
+  ("F5 / Ctrl+R", "Yenilə"),
+  ("Ctrl+F5 / Ctrl+Shift+R", "Keşsiz yenilə"),
+  ("F12 / Ctrl+Shift+I", "DevTools"),
+  ("Ctrl+P", "PDF kimi çap"),
+  ("Alt+Home", "Ana səhifə"),
+  ("Ctrl++ / Ctrl+-", "Zoom böyüt / kiçilt"),
+  ("Ctrl+0", "Zoom sıfırla"),
+  ("F11", "Tam ekran"),
+  ("Alt+← / Alt+→", "Geri / İrəli"),
+  ("Ctrl+Q", "Çıxış"),
+]
 
-SHORTCUTS_HTML = """
-<h3>Klaviatura qısayolları</h3>
-<table cellspacing='6'>
-<tr><td><b>Ctrl+T</b></td><td>Yeni tab</td></tr>
-<tr><td><b>Ctrl+W</b></td><td>Tabı bağla</td></tr>
-<tr><td><b>Ctrl+Shift+T</b></td><td>Son tabı bərpa et</td></tr>
-<tr><td><b>Ctrl+1…8 / Ctrl+9</b></td><td>Taba keç / son tab</td></tr>
-<tr><td><b>Ctrl+Tab</b></td><td>Növbəti tab</td></tr>
-<tr><td><b>Ctrl+L / F6</b></td><td>Ünvan sətri / fokus dəyiş</td></tr>
-<tr><td><b>Ctrl+F</b></td><td>Səhifədə axtar</td></tr>
-<tr><td><b>Esc</b></td><td>Dayandır / axtarışı bağla</td></tr>
-<tr><td><b>Ctrl+B / Ctrl+D</b></td><td>Əlfəcinlər / əlavə et</td></tr>
-<tr><td><b>Ctrl+H / Ctrl+J</b></td><td>Tarixçə / Yükləmələr</td></tr>
-<tr><td><b>F5 / Ctrl+R</b></td><td>Yenilə</td></tr>
-<tr><td><b>Ctrl+F5 / Ctrl+Shift+R</b></td><td>Keşsiz yenilə</td></tr>
-<tr><td><b>F12 / Ctrl+Shift+I</b></td><td>DevTools</td></tr>
-<tr><td><b>Ctrl+P</b></td><td>PDF kimi çap</td></tr>
-<tr><td><b>Alt+Home</b></td><td>Ana səhifə</td></tr>
-<tr><td><b>Ctrl++ / Ctrl+-</b></td><td>Zoom</td></tr>
-<tr><td><b>Ctrl+0</b></td><td>Zoom sıfırla</td></tr>
-<tr><td><b>F11</b></td><td>Tam ekran</td></tr>
-<tr><td><b>Alt+←/→</b></td><td>Geri / İrəli</td></tr>
-<tr><td><b>Ctrl+Q</b></td><td>Çıxış</td></tr>
-</table>
-"""
+
+class ShortcutsDialog(QDialog):
+  def __init__(self, parent=None):
+    super().__init__(parent)
+    self.setObjectName("shortcutsDialog")
+    self.setWindowTitle("Qısayollar")
+    self.setMinimumSize(460, 540)
+
+    layout = QVBoxLayout(self)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    header = QLabel("Klaviatura qısayolları")
+    header.setObjectName("shortcutsHeader")
+    layout.addWidget(header)
+
+    scroll = QScrollArea()
+    scroll.setObjectName("shortcutsScroll")
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    body = QWidget()
+    grid = QGridLayout(body)
+    grid.setContentsMargins(20, 12, 20, 16)
+    grid.setHorizontalSpacing(16)
+    grid.setVerticalSpacing(10)
+    grid.setColumnStretch(1, 1)
+
+    for row, (keys, desc) in enumerate(SHORTCUTS):
+      key_label = QLabel(keys)
+      key_label.setObjectName("shortcutKey")
+      key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+      desc_label = QLabel(desc)
+      desc_label.setObjectName("shortcutDesc")
+      grid.addWidget(key_label, row, 0, Qt.AlignmentFlag.AlignTop)
+      grid.addWidget(desc_label, row, 1)
+
+    scroll.setWidget(body)
+    layout.addWidget(scroll, 1)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    buttons.rejected.connect(self.reject)
+    buttons.accepted.connect(self.accept)
+    footer = QHBoxLayout()
+    footer.setContentsMargins(20, 8, 20, 16)
+    footer.addStretch()
+    footer.addWidget(buttons)
+    layout.addLayout(footer)

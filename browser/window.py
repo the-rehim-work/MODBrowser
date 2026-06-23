@@ -8,10 +8,12 @@ from PyQt6.QtWidgets import (
   QApplication,
   QFileDialog,
   QHBoxLayout,
+  QLabel,
   QLineEdit,
   QMainWindow,
   QMenu,
   QMessageBox,
+  QProgressBar,
   QPushButton,
   QStackedWidget,
   QTabBar,
@@ -29,7 +31,7 @@ from browser.features.history import HistoryPage
 from browser.session.persistence import BookmarkStore
 from browser.session.settings import BrowserSettings
 from browser.session.store import SessionStore
-from browser.ui.dialogs import SHORTCUTS_HTML, SettingsDialog, apply_proxy
+from browser.ui.dialogs import ShortcutsDialog, SettingsDialog, apply_proxy
 from browser.ui.devtools import DevToolsDock
 from browser.ui.find_bar import FindBar
 from browser.ui.icons import back_icon, close_icon, forward_icon, plus_icon, reload_icon, stop_icon
@@ -46,6 +48,8 @@ from browser.session.bundle import build_session, read_session, write_session
 class AddressBar(QLineEdit):
   def __init__(self, parent=None):
     super().__init__(parent)
+    self._tabs: list = []
+    self._input_blocked_view = None
     self._select_all_on_release = False
 
   def select_all_and_focus(self):
@@ -166,6 +170,11 @@ class BrowserWindow(QMainWindow):
     self.btn_forward = self._make_nav_btn(forward_icon(14), "İrəli (Alt+Sağ)", self._go_forward)
     self.btn_reload = self._make_nav_btn(reload_icon(14), "Yenilə (Ctrl+R)", self._toggle_reload_stop)
 
+    self.sec_label = QLabel()
+    self.sec_label.setObjectName("secLabel")
+    self.sec_label.setFixedWidth(20)
+    self.sec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
     self.address_bar = AddressBar()
     self.address_bar.setObjectName("addressBar")
     self.address_bar.setPlaceholderText("URL daxil edin və ya axtarın...")
@@ -203,10 +212,18 @@ class BrowserWindow(QMainWindow):
     tb.addWidget(self.btn_back)
     tb.addWidget(self.btn_forward)
     tb.addWidget(self.btn_reload)
+    tb.addWidget(self.sec_label)
     tb.addWidget(self.address_bar, stretch=1)
     tb.addWidget(self.star_btn)
     tb.addWidget(self.shield_btn)
     tb.addWidget(self.menu_btn)
+
+    self.progress_strip = QProgressBar()
+    self.progress_strip.setObjectName("loadStrip")
+    self.progress_strip.setRange(0, 100)
+    self.progress_strip.setTextVisible(False)
+    self.progress_strip.setFixedHeight(3)
+    self.progress_strip.hide()
 
     self.find_bar = FindBar(self)
     self.find_bar.hide()
@@ -228,7 +245,7 @@ class BrowserWindow(QMainWindow):
     self.new_tab_btn.setAutoRaise(True)
     self.new_tab_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     self.new_tab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    self.new_tab_btn.clicked.connect(lambda: self.add_tab())
+    self.new_tab_btn.clicked.connect(lambda: self.add_tab(HOME_URL))
     tab_row_layout.addWidget(self.new_tab_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     self.tab_bar = QTabBar()
@@ -252,6 +269,7 @@ class BrowserWindow(QMainWindow):
     self.bookmarks_bar.hide()
 
     root.addWidget(toolbar)
+    root.addWidget(self.progress_strip)
     root.addWidget(self.bookmarks_bar)
     root.addWidget(self.find_bar)
     root.addWidget(tab_row)
@@ -279,7 +297,7 @@ class BrowserWindow(QMainWindow):
 
     new_tab = self._app_menu.addAction("Yeni tab")
     new_tab.setShortcut(QKeySequence("Ctrl+T"))
-    new_tab.triggered.connect(lambda: self.add_tab())
+    new_tab.triggered.connect(lambda: self.add_tab(HOME_URL))
 
     close_tab = self._app_menu.addAction("Tabı bağla")
     close_tab.setShortcut(QKeySequence("Ctrl+W"))
@@ -396,11 +414,25 @@ class BrowserWindow(QMainWindow):
 
   def _toggle_adblock(self):
     blocker = self._content_blocker
-    blocker.set_enabled(not blocker.is_enabled())
+    enabling = not blocker.is_enabled()
+    blocker.set_enabled(enabling)
+    if enabling:
+      blocker.reset_count()
     self.settings.adblock_enabled = blocker.is_enabled()
     state = "aktiv edildi" if blocker.is_enabled() else "söndürüldü"
     self._toast.show_message(f"Reklam bloku {state}")
     self._update_shield()
+
+  def _update_security_indicator(self, url_str: str):
+    if url_str.startswith("https://"):
+      self.sec_label.setText("🔒")
+      self.sec_label.setToolTip("Təhlükəsiz bağlantı (HTTPS)")
+    elif url_str.startswith("http://"):
+      self.sec_label.setText("⚠")
+      self.sec_label.setToolTip("Şifrələnməmiş bağlantı (HTTP)")
+    else:
+      self.sec_label.setText("")
+      self.sec_label.setToolTip("")
 
   def open_bookmarks_page(self):
     def create():
@@ -551,6 +583,12 @@ class BrowserWindow(QMainWindow):
       click_pos = event.globalPosition().toPoint()
       if not self.address_bar.rect().contains(self.address_bar.mapFromGlobal(click_pos)):
         self.address_bar.clearFocus()
+    if obj is self.tab_bar and event.type() == QEvent.Type.MouseButtonPress:
+      if event.button() == Qt.MouseButton.MiddleButton:
+        index = self.tab_bar.tabAt(event.position().toPoint())
+        if index >= 0:
+          self.close_tab(index)
+          return True
     if obj is self.tab_bar and event.type() == QEvent.Type.ContextMenu:
       index = self.tab_bar.tabAt(event.pos())
       if index >= 0:
@@ -625,7 +663,7 @@ class BrowserWindow(QMainWindow):
       self._toast.show_message("Parametrlər yeniləndi")
 
   def _show_shortcuts(self):
-    QMessageBox.information(self, "Qısayollar", SHORTCUTS_HTML)
+    ShortcutsDialog(self).exec()
 
   def _show_about(self):
     QMessageBox.about(
@@ -735,6 +773,7 @@ class BrowserWindow(QMainWindow):
     self.tab_bar.setCurrentIndex(index)
     if url:
       tab.navigate(url)
+      QTimer.singleShot(0, tab.focus_page)
     else:
       tab.view.setHtml(BLANK_PAGE, QUrl("about:blank"))
       self.address_bar.clear()
@@ -813,12 +852,15 @@ class BrowserWindow(QMainWindow):
     if index < 0:
       return
     self._sync_stack_index(index)
+    self.progress_strip.hide()
     if index >= self.stack.count():
       return
 
     page = self.stack.widget(index)
     if not isinstance(page, BrowserTab):
       self.address_bar.clear()
+      self.sec_label.setText("")
+      self.sec_label.setToolTip("")
       placeholder = {
         DownloadsPage: "Yükləmələr",
         HistoryPage: "Tarixçə",
@@ -838,22 +880,41 @@ class BrowserWindow(QMainWindow):
     url = page.current_url().toString()
     if url and url not in ("", "about:blank"):
       self.address_bar.setText(url)
+      QTimer.singleShot(0, page.focus_page)
     else:
       self.address_bar.clear()
+    self._update_security_indicator(url)
     self._update_nav_buttons()
     self.refresh_bookmark_star()
     if self._devtools is not None and self._devtools.isVisible():
       self._devtools.inspect(page.view.page())
 
   def set_page_input_blocked(self, blocked: bool):
-    tab = self.current_tab()
-    if tab is None:
+    if blocked:
+      tab = self.current_tab()
+      if tab is None:
+        return
+      view = tab.view
+      if hasattr(view, "set_input_blocked"):
+        view.set_input_blocked(True)
+        self._input_blocked_view = view
+      else:
+        view.clearFocus()
       return
-    view = tab.view
-    if hasattr(view, "set_input_blocked"):
-      view.set_input_blocked(blocked)
-    elif blocked:
-      view.clearFocus()
+    view = getattr(self, "_input_blocked_view", None)
+    self._input_blocked_view = None
+    if view is not None and hasattr(view, "set_input_blocked"):
+      try:
+        view.set_input_blocked(False)
+      except RuntimeError:
+        pass
+
+  def changeEvent(self, event):
+    if event.type() == QEvent.Type.ActivationChange:
+      bar = getattr(self, "address_bar", None)
+      if bar is not None and not bar.hasFocus():
+        self.set_page_input_blocked(False)
+    super().changeEvent(event)
 
   def _focus_address_bar(self):
     self.address_bar.select_all_and_focus()
@@ -1004,11 +1065,6 @@ class BrowserWindow(QMainWindow):
     if index >= 0:
       display = title if len(title) <= 28 else title[:25] + "..."
       self.tab_bar.setTabText(index, display)
-    if tab is self.current_tab():
-      if title:
-        self.setWindowTitle(f"{title} — MOD Browser")
-      else:
-        self.setWindowTitle("MOD Browser")
 
   def update_tab_icon(self, tab: BrowserTab, icon: QIcon):
     index = self._tab_index(tab)
@@ -1018,21 +1074,32 @@ class BrowserWindow(QMainWindow):
   def update_address_bar(self, tab, url: QUrl):
     if tab is not self.current_tab():
       return
+    url_str = url.toString()
+    self._update_security_indicator(url_str)
     if self.address_bar.hasFocus() or QApplication.focusWidget() is self.address_bar:
       return
-    url_str = url.toString()
     if url_str and url_str != "about:blank":
       self.address_bar.setText(url_str)
     else:
       self.address_bar.clear()
     self.refresh_bookmark_star()
 
-  def update_load_progress(self, _progress: int):
+  def update_load_progress(self, tab, progress: int):
+    if tab is self.current_tab():
+      if 0 < progress < 100:
+        self.progress_strip.setValue(progress)
+        self.progress_strip.show()
+      else:
+        self.progress_strip.hide()
     self._update_nav_buttons()
 
   def on_load_finished(self, _ok: bool):
     self._update_nav_buttons()
     self.refresh_bookmark_star()
+    self.progress_strip.hide()
+    tab = self.current_tab()
+    if tab:
+      self._update_security_indicator(tab.current_url().toString())
 
   def _handle_download(self, download):
     handle_download(self, download, self._download_manager)
@@ -1065,6 +1132,8 @@ def main():
   app.setStyleSheet(DARK_STYLE)
   window = BrowserWindow()
   window.show()
+  window.activateWindow()
+  window.raise_()
   sys.exit(app.exec())
 
 

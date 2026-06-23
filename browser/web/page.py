@@ -9,31 +9,15 @@ from PyQt6.QtWidgets import QMenu
 from browser.ui.icons import back_icon, forward_icon, reload_icon
 from browser.web.adblock import is_local_host
 
-_LINK_OPEN_LABELS = (
-  "open link in new tab",
-  "open link in new window",
-  "open in new tab",
-  "open in new window",
+_SCRUBBED_WEB_ACTIONS = (
+  "Back",
+  "Forward",
+  "Reload",
+  "Stop",
+  "OpenLinkInNewTab",
+  "OpenLinkInNewWindow",
+  "OpenLinkInNewBackgroundTab",
 )
-
-_NAV_LABELS = ("back", "forward", "reload", "stop")
-
-
-def _action_text(action: QAction) -> str:
-  return action.text().replace("&", "").strip().lower()
-
-
-def _is_duplicate_link_open_action(action: QAction) -> bool:
-  if action.isSeparator():
-    return False
-  text = _action_text(action)
-  return any(label in text for label in _LINK_OPEN_LABELS)
-
-
-def _is_nav_action(action: QAction) -> bool:
-  if action.isSeparator():
-    return False
-  return _action_text(action) in _NAV_LABELS
 
 
 def _cleanup_menu_separators(menu: QMenu):
@@ -66,6 +50,19 @@ class BrowserView(QWebEngineView):
   def __init__(self, browser_window, parent=None):
     super().__init__(parent)
     self._browser_window = browser_window
+
+  def _scrubbed_actions(self) -> set:
+    page = self.page()
+    result = set()
+    for name in _SCRUBBED_WEB_ACTIONS:
+      member = getattr(QWebEnginePage.WebAction, name, None)
+      if member is None:
+        continue
+      try:
+        result.add(page.action(member))
+      except Exception:
+        continue
+    return result
 
   def _add_nav_actions(self, menu: QMenu, before: QAction | None):
     icon_color = "#e8eaed"
@@ -101,8 +98,9 @@ class BrowserView(QWebEngineView):
       menu = QMenu(self)
     menu.setObjectName("contextMenu")
 
+    scrubbed = self._scrubbed_actions()
     for action in list(menu.actions()):
-      if _is_duplicate_link_open_action(action) or _is_nav_action(action):
+      if action in scrubbed:
         menu.removeAction(action)
 
     if has_link:

@@ -289,4 +289,33 @@ QToolTip { background-color: #3c4043; color: #e8eaed; border: 1px solid #5f6368;
     background-color: #292a2d;
     padding: 4px 8px;
 }
+
+#secLabel { color: #9aa0a6; font-size: 14px; }
+
+#loadStrip {
+    background-color: transparent;
+    border: none;
+    max-height: 3px;
+    min-height: 3px;
+}
+#loadStrip::chunk { background-color: #8ab4f8; }
+
+#shortcutsDialog { background-color: #202124; }
+#shortcutsScroll { background-color: #202124; border: none; }
+#shortcutsHeader {
+    color: #e8eaed;
+    font-size: 18px;
+    padding: 18px 20px 8px 20px;
+    border-bottom: 1px solid #3c4043;
+}
+#shortcutKey {
+    background-color: #3c4043;
+    border: 1px solid #5f6368;
+    border-radius: 4px;
+    color: #e8eaed;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    padding: 3px 8px;
+}
+#shortcutDesc { color: #9aa0a6; font-size: 13px; }
 """

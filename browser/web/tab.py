@@ -124,7 +124,7 @@ class BrowserTab(QWidget):
     self.window().update_tab_title(self, display)
 
   def _on_load_progress(self, progress: int):
-    self.window().update_load_progress(progress)
+    self.window().update_load_progress(self, progress)
 
   def _on_load_finished(self, ok: bool):
     self._browser_window.update_google_auth_state(self, self.view.url())
@@ -183,6 +183,12 @@ class BrowserTab(QWidget):
 
   def stop(self):
     self.view.stop()
+
+  def focus_page(self):
+    if hasattr(self.view, "focus_page"):
+      self.view.focus_page()
+    else:
+      self.view.setFocus()
 
   def can_go_back(self) -> bool:
     return self.view.history().canGoBack()

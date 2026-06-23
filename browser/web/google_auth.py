@@ -3,7 +3,7 @@
 import re
 
 from PyQt6.QtCore import QUrl
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineUrlRequestInfo, QWebEngineUrlRequestInterceptor
+from PyQt6.QtWebEngineCore import QWebEngineProfile
 
 FIREFOX_UA = (
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) "
@@ -46,11 +46,3 @@ def apply_firefox_identity(profile: QWebEngineProfile):
   hints = profile.clientHints()
   if hints is not None:
     hints.setAllClientHintsEnabled(False)
-
-
-class GoogleAuthInterceptor(QWebEngineUrlRequestInterceptor):
-  def interceptRequest(self, info: QWebEngineUrlRequestInfo):
-    if not is_google_auth_url(info.requestUrl()):
-      return
-
-    info.setHttpHeader(b"User-Agent", FIREFOX_UA.encode("ascii"))
