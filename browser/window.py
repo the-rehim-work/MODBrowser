@@ -51,7 +51,6 @@ class AddressBar(QLineEdit):
   def __init__(self, parent=None):
     super().__init__(parent)
     self._tabs: list = []
-    self._input_blocked_view = None
     self._select_all_on_release = False
 
   def select_all_and_focus(self):
@@ -118,6 +117,7 @@ class BrowserWindow(QMainWindow):
     self._download_manager = DownloadManager(self)
     self._download_manager.record_updated.connect(self._on_download_updated)
     self._tabs: list = []
+    self._input_blocked_view = None
     self._devtools = None
     self._google_auth_tabs = 0
     self._using_firefox_identity = False
@@ -614,10 +614,11 @@ class BrowserWindow(QMainWindow):
       write_session(
         build_session(tabs, self._session.history(), bookmarks, cookies), path
       )
-      suffix = f" · {len(cookies)} cookie" if cookies else ""
-      self._toast.show_message(f"{len(tabs)} tab ixrac edildi{suffix}")
-    except OSError:
+    except (OSError, TypeError, ValueError):
       self._toast.show_message("İxrac alınmadı")
+      return
+    suffix = f" · {len(cookies)} cookie" if cookies else ""
+    self._toast.show_message(f"{len(tabs)} tab ixrac edildi{suffix}")
 
   def import_session(self):
     path, _ = QFileDialog.getOpenFileName(
@@ -996,6 +997,10 @@ class BrowserWindow(QMainWindow):
       else:
         view.clearFocus()
       return
+    view = self._input_blocked_view
+    self._input_blocked_view = None
+    if view is not None and hasattr(view, "set_input_blocked"):
+      view.set_input_blocked(False)
 
   def changeEvent(self, event):
     if event.type() == QEvent.Type.ActivationChange:

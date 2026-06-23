@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QElapsedTimer, QEventLoop, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from browser.web.adblock import is_local_host
 try:
   from qtwebview2 import QtWebView2Widget
@@ -405,9 +405,25 @@ class WebView2BrowserView(QWidget):
     if manager is None:
       return []
     try:
-      cookies = manager.GetCookiesAsync("").Result
+      task = manager.GetCookiesAsync(None)
     except Exception:
       return []
+    app = QApplication.instance()
+    if app is None:
+      return []
+    timer = QElapsedTimer()
+    timer.start()
+    while not task.IsCompleted and timer.elapsed() < 5000:
+      app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents, 25)
+    if not task.IsCompleted:
+      return []
+    try:
+      cookies = task.Result
+    except Exception:
+      return []
+    return self._serialize_cookies(cookies)
+
+  def _serialize_cookies(self, cookies) -> list:
     rows = []
     for cookie in cookies:
       try:
