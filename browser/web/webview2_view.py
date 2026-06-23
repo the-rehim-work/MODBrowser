@@ -391,3 +391,77 @@ class WebView2BrowserView(QWidget):
 
   def lastContextMenuRequest(self):
     return None
+
+  def _cookie_manager(self):
+    if not self._widget.is_ready:
+      return None
+    try:
+      return self._widget._webview.CoreWebView2.CookieManager
+    except Exception:
+      return None
+
+  def export_cookies(self) -> list:
+    manager = self._cookie_manager()
+    if manager is None:
+      return []
+    try:
+      cookies = manager.GetCookiesAsync("").Result
+    except Exception:
+      return []
+    rows = []
+    for cookie in cookies:
+      try:
+        expires = float(cookie.Expires)
+      except Exception:
+        expires = -1.0
+      session = bool(getattr(cookie, "IsSession", expires < 0))
+      rows.append(
+        {
+          "name": cookie.Name,
+          "value": cookie.Value,
+          "domain": cookie.Domain,
+          "path": cookie.Path,
+          "secure": bool(cookie.IsSecure),
+          "http_only": bool(cookie.IsHttpOnly),
+          "expires": None if session or expires < 0 else expires,
+          "same_site": self._same_site_name(cookie.SameSite),
+        }
+      )
+    return rows
+
+  def import_cookies(self, rows) -> int:
+    manager = self._cookie_manager()
+    if manager is None:
+      return 0
+    count = 0
+    for row in rows:
+      domain = (row.get("domain") or "").strip()
+      if not domain:
+        continue
+      try:
+        cookie = manager.CreateCookie(
+          row.get("name", ""), row.get("value", ""), domain, row.get("path") or "/"
+        )
+        cookie.IsSecure = bool(row.get("secure"))
+        cookie.IsHttpOnly = bool(row.get("http_only"))
+        expires = row.get("expires")
+        if expires is not None:
+          cookie.Expires = float(expires)
+        same_site = self._same_site_kind(row.get("same_site"))
+        if same_site is not None:
+          try:
+            cookie.SameSite = same_site
+          except Exception:
+            pass
+        manager.AddOrUpdateCookie(cookie)
+        count += 1
+      except Exception:
+        continue
+    return count
+
+  def _same_site_name(self, kind):
+    name = str(kind).rsplit(".", 1)[-1].lower()
+    return name if name in ("none", "lax", "strict") else None
+
+  def _same_site_kind(self, name):
+    return {"none": 0, "lax": 1, "strict": 2}.get(name)

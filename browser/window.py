@@ -37,7 +37,9 @@ from browser.ui.find_bar import FindBar
 from browser.ui.icons import back_icon, close_icon, forward_icon, plus_icon, reload_icon, stop_icon
 from browser.ui.styles import DARK_STYLE
 from browser.ui.toast import Toast
+from browser.ui.win_shortcuts import WindowsShortcutFilter
 from browser.web import page, tab
+from browser.web.cookies import CookieJar
 from browser.web.google_auth import apply_firefox_identity, is_google_auth_url
 from browser.web.engine import preferred_engine
 from browser.web.media import check_h264_support
@@ -110,6 +112,8 @@ class BrowserWindow(QMainWindow):
     self._bookmarks = BookmarkStore()
     self._bookmarks.load()
     self._profile, self._content_blocker = create_incognito_profile(self.settings, self)
+    self._cookie_jar = CookieJar(self._profile, self) if preferred_engine() == "webengine" else None
+    self._win_shortcuts = None
     self._profile.downloadRequested.connect(self._handle_download)
     self._download_manager = DownloadManager(self)
     self._download_manager.record_updated.connect(self._on_download_updated)
@@ -136,6 +140,7 @@ class BrowserWindow(QMainWindow):
     self._shield_timer.timeout.connect(self._update_shield)
     self._shield_timer.start(1000)
     QApplication.instance().installEventFilter(self)
+    self._install_win_shortcuts()
     self.reset_idle_timer()
     apply_proxy(self.settings)
     self.add_tab(HOME_URL)
@@ -403,6 +408,55 @@ class BrowserWindow(QMainWindow):
     last_action.triggered.connect(self._last_tab)
     self.addAction(last_action)
 
+  def _install_win_shortcuts(self):
+    if sys.platform != "win32":
+      return
+    self._win_shortcuts = WindowsShortcutFilter(self, self._build_win_shortcut_table())
+    QApplication.instance().installNativeEventFilter(self._win_shortcuts)
+
+  def _build_win_shortcut_table(self) -> dict:
+    f5, f6, f11, f12 = 0x74, 0x75, 0x7A, 0x7B
+    tab_key, zero, nine = 0x09, 0x30, 0x39
+    oem_plus, oem_minus, add, subtract = 0xBB, 0xBD, 0x6B, 0x6D
+    left, right, home = 0x25, 0x27, 0x24
+    key = {char: ord(char) for char in "BDFHIJLPRTW"}
+    table = {
+      (1, 0, 0, key["L"]): self._focus_address_bar,
+      (0, 0, 1, key["D"]): self._focus_address_bar,
+      (1, 0, 0, key["T"]): lambda: self.add_tab(HOME_URL),
+      (1, 0, 0, key["W"]): lambda: self.close_tab(self.tab_bar.currentIndex()),
+      (1, 1, 0, key["T"]): self.restore_closed_tab,
+      (1, 0, 0, key["R"]): self._reload,
+      (0, 0, 0, f5): self._reload,
+      (1, 1, 0, key["R"]): self._hard_reload,
+      (1, 0, 0, key["F"]): self.find_bar.show_bar,
+      (1, 0, 0, key["B"]): self.open_bookmarks_page,
+      (1, 1, 0, key["B"]): self._toggle_bookmarks_bar,
+      (1, 0, 0, key["H"]): self.open_history_page,
+      (1, 0, 0, key["J"]): self.open_downloads_page,
+      (1, 0, 0, key["D"]): self._toggle_bookmark,
+      (1, 0, 0, key["P"]): self._print_page,
+      (1, 0, 0, zero): self._zoom_reset,
+      (1, 0, 0, oem_plus): self._zoom_in,
+      (1, 1, 0, oem_plus): self._zoom_in,
+      (1, 0, 0, add): self._zoom_in,
+      (1, 0, 0, oem_minus): self._zoom_out,
+      (1, 0, 0, subtract): self._zoom_out,
+      (0, 0, 0, f6): self._cycle_focus,
+      (0, 0, 0, f11): self.toggle_fullscreen,
+      (0, 0, 0, f12): self._toggle_devtools,
+      (1, 1, 0, key["I"]): self._toggle_devtools,
+      (1, 0, 0, tab_key): self._next_tab,
+      (1, 1, 0, tab_key): self._prev_tab,
+      (0, 0, 1, left): self._go_back,
+      (0, 0, 1, right): self._go_forward,
+      (0, 0, 1, home): self._go_home,
+    }
+    for digit in range(1, 9):
+      table[(1, 0, 0, zero + digit)] = (lambda idx: lambda: self._jump_to_tab(idx))(digit - 1)
+    table[(1, 0, 0, nine)] = self._last_tab
+    return table
+
   def _update_shield(self):
     blocker = self._content_blocker
     if blocker.is_enabled():
@@ -520,6 +574,24 @@ class BrowserWindow(QMainWindow):
       snapshot.append((url, tab.view.title()))
     return snapshot
 
+  def _capture_cookies(self) -> list:
+    if preferred_engine() == "webengine":
+      return self._cookie_jar.export_cookies() if self._cookie_jar else []
+    tab = self.current_tab()
+    if tab is not None and hasattr(tab.view, "export_cookies"):
+      return tab.view.export_cookies()
+    return []
+
+  def _restore_cookies(self, rows) -> int:
+    if not rows:
+      return 0
+    if preferred_engine() == "webengine":
+      return self._cookie_jar.import_cookies(rows) if self._cookie_jar else 0
+    tab = self.current_tab()
+    if tab is not None and hasattr(tab.view, "import_cookies"):
+      return tab.view.import_cookies(rows)
+    return 0
+
   def export_session(self):
     tabs = self._open_tabs_snapshot()
     if not tabs:
@@ -537,9 +609,13 @@ class BrowserWindow(QMainWindow):
     )
     if not path:
       return
+    cookies = self._capture_cookies()
     try:
-      write_session(build_session(tabs, self._session.history(), bookmarks), path)
-      self._toast.show_message(f"{len(tabs)} tab ixrac edildi")
+      write_session(
+        build_session(tabs, self._session.history(), bookmarks, cookies), path
+      )
+      suffix = f" · {len(cookies)} cookie" if cookies else ""
+      self._toast.show_message(f"{len(tabs)} tab ixrac edildi{suffix}")
     except OSError:
       self._toast.show_message("İxrac alınmadı")
 
@@ -550,7 +626,7 @@ class BrowserWindow(QMainWindow):
     if not path:
       return
     try:
-      tabs, bookmarks = read_session(path)
+      tabs, bookmarks, cookies = read_session(path)
     except (OSError, ValueError):
       self._toast.show_message("Fayl oxunmadı")
       return
@@ -558,9 +634,18 @@ class BrowserWindow(QMainWindow):
       self._bookmarks.import_items(bookmarks)
       self.refresh_bookmarks_bar()
       self.refresh_bookmark_star()
-    for url, _title in tabs:
+    restored = self._restore_cookies(cookies)
+    urls = [url for url, _title in tabs]
+    if restored:
+      QTimer.singleShot(150, lambda: self._open_imported_tabs(urls))
+    else:
+      self._open_imported_tabs(urls)
+    suffix = f" · {restored} cookie" if restored else ""
+    self._toast.show_message(f"{len(tabs)} tab bərpa edildi{suffix}")
+
+  def _open_imported_tabs(self, urls):
+    for url in urls:
       self.add_tab(url)
-    self._toast.show_message(f"{len(tabs)} tab bərpa edildi")
 
   def reset_idle_timer(self):
     if self.settings.idle_minutes <= 0:
@@ -889,6 +974,15 @@ class BrowserWindow(QMainWindow):
     if self._devtools is not None and self._devtools.isVisible():
       self._devtools.inspect(page.view.page())
 
+  def _pull_keyboard_focus_to_host(self):
+    if sys.platform != "win32":
+      return
+    try:
+      import ctypes
+      ctypes.windll.user32.SetFocus(int(self.winId()))
+    except Exception:
+      pass
+
   def set_page_input_blocked(self, blocked: bool):
     if blocked:
       tab = self.current_tab()
@@ -898,22 +992,20 @@ class BrowserWindow(QMainWindow):
       if hasattr(view, "set_input_blocked"):
         view.set_input_blocked(True)
         self._input_blocked_view = view
+        self._pull_keyboard_focus_to_host()
       else:
         view.clearFocus()
       return
-    view = getattr(self, "_input_blocked_view", None)
-    self._input_blocked_view = None
-    if view is not None and hasattr(view, "set_input_blocked"):
-      try:
-        view.set_input_blocked(False)
-      except RuntimeError:
-        pass
 
   def changeEvent(self, event):
     if event.type() == QEvent.Type.ActivationChange:
       bar = getattr(self, "address_bar", None)
       if bar is not None and not bar.hasFocus():
         self.set_page_input_blocked(False)
+        if self.isActiveWindow():
+          tab = self.current_tab()
+          if tab is not None:
+            QTimer.singleShot(0, tab.focus_page)
     super().changeEvent(event)
 
   def _focus_address_bar(self):
@@ -923,7 +1015,8 @@ class BrowserWindow(QMainWindow):
     tab = self.current_tab()
     if tab:
       tab.navigate(self.address_bar.text())
-      tab.view.setFocus()
+      self.address_bar.clearFocus()
+      QTimer.singleShot(0, tab.focus_page)
 
   def _go_back(self):
     tab = self.current_tab()
@@ -963,7 +1056,8 @@ class BrowserWindow(QMainWindow):
     if self.address_bar.hasFocus():
       tab = self.current_tab()
       if tab:
-        tab.view.setFocus()
+        self.address_bar.clearFocus()
+        tab.focus_page()
     else:
       self.address_bar.select_all_and_focus()
 

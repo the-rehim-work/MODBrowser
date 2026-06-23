@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def build_session(tabs, history, bookmarks=None):
+def build_session(tabs, history, bookmarks=None, cookies=None):
   open_tabs = []
   for url, title in tabs:
     url = (url or "").strip()
@@ -12,7 +12,7 @@ def build_session(tabs, history, bookmarks=None):
       continue
     open_tabs.append({"url": url, "title": title or url})
   data = {
-    "version": 1,
+    "version": 2,
     "tabs": open_tabs,
     "history": [
       {"url": e.url, "title": e.title, "visited_at": e.visited_at} for e in history
@@ -20,6 +20,8 @@ def build_session(tabs, history, bookmarks=None):
   }
   if bookmarks is not None:
     data["bookmarks"] = [{"url": b.url, "title": b.title} for b in bookmarks]
+  if cookies:
+    data["cookies"] = cookies
   return data
 
 
@@ -39,4 +41,5 @@ def read_session(path):
     for row in raw.get("bookmarks", [])
     if row.get("url")
   ]
-  return tabs, bookmarks
+  cookies = [row for row in raw.get("cookies", []) if isinstance(row, dict) and row.get("domain")]
+  return tabs, bookmarks, cookies
