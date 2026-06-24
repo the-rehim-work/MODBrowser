@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
   QWidget,
 )
 
-from browser.cleanup import cleanup_pycache
+from browser.cleanup import cleanup_pycache, sweep_webview2_data
 from browser.constants import BLANK_PAGE, HOME_URL, NEW_TAB_TITLE
 from browser.features.bookmarks import BookmarksBar, BookmarksPage
 from browser.features.bookmark_io import export_html, parse_html
@@ -42,6 +42,7 @@ from browser.web import page, tab
 from browser.web.cookies import CookieJar
 from browser.web.google_auth import apply_firefox_identity, is_google_auth_url
 from browser.web.engine import preferred_engine
+from browser.web.webview2_view import session_user_data_dir
 from browser.web.media import check_h264_support
 from browser.web.profile import apply_browser_identity, create_incognito_profile
 from browser.web.tab import BrowserTab, tab_display_title
@@ -355,6 +356,11 @@ class BrowserWindow(QMainWindow):
 
     self._app_menu.addSeparator()
 
+    devtools_action = self._app_menu.addAction("DevTools")
+    devtools_action.triggered.connect(self._toggle_devtools)
+
+    self._app_menu.addSeparator()
+
     quit_action = self._app_menu.addAction("Çıxış")
     quit_action.setShortcut(QKeySequence("Ctrl+Q"))
     quit_action.triggered.connect(self.close)
@@ -582,15 +588,17 @@ class BrowserWindow(QMainWindow):
       return tab.view.export_cookies()
     return []
 
-  def _restore_cookies(self, rows) -> int:
+  def _restore_cookies_into(self, tab, rows):
     if not rows:
-      return 0
+      return 0, 0
     if preferred_engine() == "webengine":
-      return self._cookie_jar.import_cookies(rows) if self._cookie_jar else 0
-    tab = self.current_tab()
+      n = self._cookie_jar.import_cookies(rows) if self._cookie_jar else 0
+      return n, n
     if tab is not None and hasattr(tab.view, "import_cookies"):
-      return tab.view.import_cookies(rows)
-    return 0
+      attempted = len([r for r in rows if (r.get("domain") or "").strip()])
+      verified = tab.view.import_cookies(rows)
+      return attempted, verified
+    return 0, 0
 
   def export_session(self):
     tabs = self._open_tabs_snapshot()
@@ -635,18 +643,51 @@ class BrowserWindow(QMainWindow):
       self._bookmarks.import_items(bookmarks)
       self.refresh_bookmarks_bar()
       self.refresh_bookmark_star()
-    restored = self._restore_cookies(cookies)
     urls = [url for url, _title in tabs]
-    if restored:
-      QTimer.singleShot(150, lambda: self._open_imported_tabs(urls))
-    else:
-      self._open_imported_tabs(urls)
-    suffix = f" · {restored} cookie" if restored else ""
-    self._toast.show_message(f"{len(tabs)} tab bərpa edildi{suffix}")
+    if not urls:
+      attempted, verified = self._restore_cookies_into(self.current_tab(), cookies)
+      if attempted == 0:
+        suffix = ""
+      elif verified == attempted:
+        suffix = f" · {verified} cookie"
+      else:
+        suffix = f" · {verified}/{attempted} cookie (bəzi cookie yazılmadı)"
+      self._toast.show_message(f"0 tab bərpa edildi{suffix}")
+      return
+    tab = self._new_blank_tab()
 
-  def _open_imported_tabs(self, urls):
-    for url in urls:
+    def _finish():
+      attempted, verified = self._restore_cookies_into(tab, cookies)
+      QTimer.singleShot(0, lambda: self._open_imported_tabs(tab, urls, attempted, verified))
+
+    view = tab.view
+    if hasattr(view, "run_when_ready"):
+      view.run_when_ready(_finish)
+    else:
+      _finish()
+
+  def _new_blank_tab(self):
+    tab = BrowserTab(self._profile, self, self)
+    index = self.tab_bar.addTab(NEW_TAB_TITLE)
+    self.stack.addWidget(tab)
+    self._attach_tab_close_button(index)
+    self._tabs.append(tab)
+    self.tab_bar.setCurrentIndex(index)
+    tab.view.setHtml(BLANK_PAGE, QUrl("about:blank"))
+    return tab
+
+  def _open_imported_tabs(self, first_tab, urls, attempted, verified):
+    first_tab.navigate(urls[0])
+    QTimer.singleShot(0, first_tab.focus_page)
+    for url in urls[1:]:
       self.add_tab(url)
+    if attempted == 0:
+      suffix = ""
+    elif verified == attempted:
+      suffix = f" · {verified} cookie"
+    else:
+      suffix = f" · {verified}/{attempted} cookie (bəzi cookie yazılmadı)"
+    self._toast.show_message(f"{len(urls)} tab bərpa edildi{suffix}")
 
   def reset_idle_timer(self):
     if self.settings.idle_minutes <= 0:
@@ -1209,8 +1250,14 @@ class BrowserWindow(QMainWindow):
 
   def closeEvent(self, event):
     QApplication.instance().removeEventFilter(self)
+    wiped = False
     for tab in list(self._tabs):
-      if isinstance(tab, BrowserTab) and hasattr(tab.view, "setPage"):
+      if not isinstance(tab, BrowserTab):
+        continue
+      if not wiped and hasattr(tab.view, "wipe_cookies"):
+        tab.view.wipe_cookies()
+        wiped = True
+      if hasattr(tab.view, "setPage"):
         tab.view.setPage(None)
         tab.view.deleteLater()
     self._tabs.clear()
@@ -1226,7 +1273,9 @@ def main():
   app = QApplication(sys.argv)
   app.setApplicationName("MOD Browser")
   app.setOrganizationName("MOD")
+  sweep_webview2_data(keep=session_user_data_dir())
   app.aboutToQuit.connect(cleanup_pycache)
+  app.aboutToQuit.connect(lambda: sweep_webview2_data())
   app.setStyle("Fusion")
   app.setStyleSheet(DARK_STYLE)
   window = BrowserWindow()

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 
 from PyQt6.QtCore import Qt, QElapsedTimer, QEventLoop, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QIcon
@@ -16,6 +18,18 @@ try:
 except ImportError:
   WEBVIEW2_AVAILABLE = False
   QtWebView2Widget = None
+
+WEBVIEW2_DATA_PREFIX = "MODBrowser-WV2-"
+_SESSION_DATA_DIR = None
+
+
+def session_user_data_dir() -> str:
+  global _SESSION_DATA_DIR
+  if _SESSION_DATA_DIR is None:
+    _SESSION_DATA_DIR = os.path.join(
+      tempfile.gettempdir(), f"{WEBVIEW2_DATA_PREFIX}{os.getpid()}"
+    )
+  return _SESSION_DATA_DIR
 
 
 class WebView2PageStub:
@@ -59,6 +73,7 @@ class WebView2BrowserView(QWidget):
     self._current_url = QUrl()
     self._page = WebView2PageStub(self)
     self._input_blocked = False
+    self._devtools_open = False
 
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -67,9 +82,10 @@ class WebView2BrowserView(QWidget):
     self._widget = QtWebView2Widget(
       parent=self,
       context_menus=True,
-      handle_new_window=True,
+      handle_new_window=False,
       lazyload=False,
       fullscreen_support=True,
+      user_data_folder=session_user_data_dir(),
     )
     layout.addWidget(self._widget)
     self._widget.bridge.domContentLoaded.connect(self._on_dom_loaded)
@@ -96,6 +112,7 @@ class WebView2BrowserView(QWidget):
       core.NewWindowRequested += self._on_new_window_requested
       core.NavigationStarting += self._on_navigation_starting
       core.SourceChanged += self._on_source_changed
+      core.ContextMenuRequested += self._on_context_menu_requested
       self._install_resource_blocker(core)
     except Exception:
       pass
@@ -164,11 +181,20 @@ class WebView2BrowserView(QWidget):
       "Ping": "ping",
     }.get(name, "other")
 
-  def open_dev_tools(self):
-    if not self._widget.is_ready:
-      return
+  def _on_context_menu_requested(self, sender, args):
     try:
-      self._widget._webview.CoreWebView2.OpenDevToolsWindow()
+      core = self._widget._webview.CoreWebView2
+      env = core.Environment
+      sep = env.CreateContextMenuItem("", None, 0x03)
+      label = "DevTools"
+      devtools_item = env.CreateContextMenuItem(label, None, 0x00)
+
+      def _on_devtools_clicked(_s, _a):
+        QTimer.singleShot(0, self.open_dev_tools)
+
+      devtools_item.CustomItemSelected += _on_devtools_clicked
+      args.MenuItems.Insert(args.MenuItems.Count, sep)
+      args.MenuItems.Insert(args.MenuItems.Count, devtools_item)
     except Exception:
       pass
 
@@ -334,7 +360,13 @@ class WebView2BrowserView(QWidget):
     if not self._widget.is_ready:
       return
     try:
-      self._widget._webview.CoreWebView2.OpenDevToolsWindow()
+      core = self._widget._webview.CoreWebView2
+      if self._devtools_open:
+        core.CloseDevToolsWindow()
+        self._devtools_open = False
+      else:
+        core.OpenDevToolsWindow()
+        self._devtools_open = True
     except Exception:
       pass
 
@@ -391,6 +423,29 @@ class WebView2BrowserView(QWidget):
 
   def lastContextMenuRequest(self):
     return None
+
+  def run_when_ready(self, callback):
+    if self._widget.is_ready:
+      callback()
+      return
+
+    def _once(success: bool, _error: str):
+      try:
+        self._widget.bridge.initialization_done.disconnect(_once)
+      except Exception:
+        pass
+      callback()
+
+    self._widget.bridge.initialization_done.connect(_once)
+
+  def wipe_cookies(self):
+    manager = self._cookie_manager()
+    if manager is None:
+      return
+    try:
+      manager.DeleteAllCookies()
+    except Exception:
+      pass
 
   def _cookie_manager(self):
     if not self._widget.is_ready:
@@ -449,7 +504,7 @@ class WebView2BrowserView(QWidget):
     manager = self._cookie_manager()
     if manager is None:
       return 0
-    count = 0
+    inject_attempted = 0
     for row in rows:
       domain = (row.get("domain") or "").strip()
       if not domain:
@@ -470,10 +525,30 @@ class WebView2BrowserView(QWidget):
           except Exception:
             pass
         manager.AddOrUpdateCookie(cookie)
-        count += 1
+        inject_attempted += 1
       except Exception:
         continue
-    return count
+    return self._verify_injected(manager, inject_attempted)
+
+  def _verify_injected(self, manager, attempted: int) -> int:
+    app = QApplication.instance()
+    if app is None:
+      return attempted
+    try:
+      task = manager.GetCookiesAsync(None)
+    except Exception:
+      return attempted
+    timer = QElapsedTimer()
+    timer.start()
+    while not task.IsCompleted and timer.elapsed() < 3000:
+      app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents, 25)
+    if not task.IsCompleted:
+      return attempted
+    try:
+      stored = list(task.Result)
+    except Exception:
+      return attempted
+    return len(stored)
 
   def _same_site_name(self, kind):
     name = str(kind).rsplit(".", 1)[-1].lower()
